@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>zkJS - Crisis of the Third Century</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app-container">
+        <!-- Left Panel: Map & Status -->
+        <div id="left-panel" class="side-panel">
+            <h3>Legion & Map</h3>
+            <div id="status-legion"></div>
+            <div id="status-resources"></div>
+            <div id="minimap-container">
+                <div id="minimap"></div>
+            </div>
+            <div id="minimap-legend">
+                <span style="color:#33ff33">You</span> | <span style="color:#ff3333">Emperor</span> | <span style="color:#ffff33">Rivals</span> | <span style="color:#ff8800">Barbarians</span> | <span style="color:#8888ff">Independent</span>
+            </div>
+        </div>
+
+        <!-- Center Game Container -->
+        <div id="game-container">
+            <div id="output"></div>
+            <div id="input-area">
+                <span id="prompt">&gt;</span>
+                <input type="text" id="command-input" autocomplete="off" autofocus>
+            </div>
+            <div id="controls">
+                <button id="save-btn">Save</button>
+                <label for="load-file" class="custom-file-upload">Load</label>
+                <input type="file" id="load-file" accept=".json">
+            </div>
+        </div>
+
+        <!-- Right Panel: Data Tabs -->
+        <div id="right-panel" class="side-panel">
+            <div class="tabs">
+                <button class="tab-btn active" data-target="tab-intel">Intel</button>
+                <button class="tab-btn" data-target="tab-bureaucracy">Actors</button>
+                <button class="tab-btn" data-target="tab-economy">Economy</button>
+            </div>
+            
+            <div id="tab-intel" class="tab-content active">
+                <div id="status-date"></div>
+                <div id="status-location"></div>
+                <div id="status-intel"></div>
+            </div>
+            
+            <div id="tab-bureaucracy" class="tab-content">
+                <div id="status-bureaucracy"></div>
+            </div>
+
+            <div id="tab-economy" class="tab-content">
+                <div id="status-economy"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="roman_map.js"></script>
+    <script src="content.js"></script>
+    <script src="engine.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

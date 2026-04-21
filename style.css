@@ -1,0 +1,220 @@
+:root {
+    --bg-color: #0c0c0c;
+    --panel-bg: #111;
+    --text-color: #33ff33;
+    --font-family: 'Courier New', Courier, monospace;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-family: var(--font-family);
+    margin: 0;
+    padding: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    box-sizing: border-box;
+}
+
+#app-container {
+    display: flex;
+    width: 100%;
+    max-width: 1600px;
+    height: 95vh;
+    gap: 15px;
+    padding: 15px;
+    box-sizing: border-box;
+}
+
+.side-panel {
+    flex: 1;
+    background-color: var(--panel-bg);
+    border: 1px solid var(--text-color);
+    border-radius: 5px;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    font-size: 13px;
+}
+
+.side-panel h3 {
+    margin-top: 0;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--text-color);
+    padding-bottom: 10px;
+    text-align: center;
+    color: #fff;
+}
+
+.side-panel div {
+    margin-bottom: 10px;
+    white-space: pre-wrap;
+    line-height: 1.4;
+}
+
+/* Minimap Node Graph */
+#minimap-container {
+    margin-top: 10px;
+    flex-grow: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    border: 1px solid #444;
+    padding: 5px;
+    background: #000;
+}
+
+#minimap {
+    position: relative;
+    background-color: #050505;
+    width: 100%;
+    aspect-ratio: 1/1;
+    overflow: hidden;
+}
+
+.map-node {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    cursor: pointer;
+    z-index: 10;
+    transition: transform 0.2s;
+}
+
+.map-node:hover {
+    transform: translate(-50%, -50%) scale(1.5);
+    z-index: 15;
+}
+
+.map-node:hover::after {
+    content: attr(title);
+    position: absolute;
+    top: -25px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #111;
+    border: 1px solid #fff;
+    color: #fff;
+    padding: 2px 5px;
+    font-size: 10px;
+    white-space: nowrap;
+    z-index: 20;
+    pointer-events: none;
+}
+
+.map-line-svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1;
+    pointer-events: none;
+}
+
+#minimap-legend {
+    font-size: 10px;
+    text-align: center;
+    margin-top: 5px;
+}
+
+/* Tabs */
+.tabs {
+    display: flex;
+    border-bottom: 1px solid var(--text-color);
+    margin-bottom: 10px;
+}
+.tab-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--text-color);
+    font-family: var(--font-family);
+    padding: 5px;
+    cursor: pointer;
+    border-right: 1px solid #333;
+}
+.tab-btn.active {
+    background: var(--text-color);
+    color: var(--bg-color);
+    font-weight: bold;
+}
+.tab-content { display: none; flex-grow: 1; overflow-y: auto; }
+.tab-content.active { display: block; }
+
+/* Main Game */
+#game-container {
+    flex: 2;
+    display: flex;
+    flex-direction: column;
+    border: 2px solid var(--text-color);
+    padding: 20px;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(51, 255, 51, 0.2);
+    background-color: #000;
+}
+
+#output {
+    flex-grow: 1;
+    overflow-y: auto;
+    margin-bottom: 20px;
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
+#output p { margin: 0 0 10px 0; }
+.command-echo { color: #ffffff; font-weight: bold; margin-top: 15px !important; }
+.error-text { color: #ffaa33; }
+.room-title { font-weight: bold; text-transform: uppercase; color: #fff; margin-top: 15px !important; }
+.combat-text { color: #ff5555; font-weight: bold; }
+.intel-text { color: #55aaff; }
+.actor-text { color: #ff00ff; }
+
+#input-area {
+    display: flex;
+    align-items: center;
+    border-top: 1px solid var(--text-color);
+    padding-top: 10px;
+    margin-bottom: 10px;
+}
+
+#prompt { margin-right: 10px; font-weight: bold; }
+
+#command-input {
+    flex-grow: 1;
+    background: transparent;
+    border: none;
+    color: #fff;
+    font-family: var(--font-family);
+    font-size: 16px;
+    outline: none;
+}
+
+#controls {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+button, .custom-file-upload {
+    background-color: transparent;
+    border: 1px solid var(--text-color);
+    color: var(--text-color);
+    padding: 5px 10px;
+    font-family: var(--font-family);
+    cursor: pointer;
+    text-transform: uppercase;
+    font-size: 12px;
+}
+
+button:hover, .custom-file-upload:hover {
+    background-color: var(--text-color);
+    color: var(--bg-color);
+}
+
+input[type="file"] { display: none; }
