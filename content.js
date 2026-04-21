@@ -32,7 +32,6 @@ const GameContent = {
             wealth: 1000,
             strength: 4000,
             morale: 100,
-            supplies: 200,
             grain: 500,
             subordinates: [],
             superior: null,
@@ -44,16 +43,31 @@ const GameContent = {
                 right: { size: 1000, max: 1000, exp: 1, type: "infantry" },
                 reserve: { size: 500, max: 500, exp: 1, type: "infantry" }
             },
-            diplomacy: {},
-            objectives: []
+            diplomacy: {}
         }
     }
+};
+
+// Historically accurate names for the Augustan regions of Italia (I-XI)
+// as they appear in the Notitia Dignitatum / late Roman administrative records
+const italianRegionNames = {
+    'i':    'Latium et Campania',     // Contains Rome; Region I
+    'ii':   'Apulia et Calabria',     // Region II — heel of Italy
+    'iii':  'Lucania et Bruttii',     // Region III — toe of Italy
+    'iv':   'Samnium',                // Region IV — central Apennines
+    'v':    'Picenum Suburbicarium',  // Region V — Adriatic coast south
+    'vi':   'Umbria',                 // Region VI — central highlands
+    'vii':  'Etruria',               // Region VII — Tuscany
+    'viii': 'Aemilia',               // Region VIII — Po valley east
+    'ix':   'Liguria',               // Region IX — Ligurian coast
+    'x':    'Venetia et Histria',    // Region X — northeast Italy
+    'xi':   'Transpadana',           // Region XI — upper Po valley
 };
 
 // Generate graph data from RomanGeoMap
 for (const [id, def] of Object.entries(RomanGeoMap)) {
     GameContent.graphData[id] = {
-        name: def.name,
+        name: italianRegionNames[id] || def.name,
         terrain: Math.random() > 0.7 ? "mountain" : (Math.random() > 0.5 ? "forest" : "plains"),
         neighbors: def.neighbors,
         polygons: def.polygons,

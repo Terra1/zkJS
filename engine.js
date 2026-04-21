@@ -97,11 +97,12 @@ class Engine {
         
         // 4. Spawn Rival Factions
         const rivalCount = Math.floor(2 + Math.random() * 3);
+        const nodeKeys = Object.keys(this.state.world.nodes);
         for (let i = 0; i < rivalCount; i++) {
             const rName = this.content.romanNames[Math.floor(Math.random() * this.content.romanNames.length)];
             let spawnNode = null;
             for (let attempt = 0; attempt < 10; attempt++) {
-                const candidate = Object.keys(this.state.world.nodes)[Math.floor(Math.random() * 53)];
+                const candidate = nodeKeys[Math.floor(Math.random() * nodeKeys.length)];
                 if (this.state.world.nodes[candidate].realm === 'independent') {
                     spawnNode = candidate;
                     break;
@@ -129,7 +130,7 @@ class Engine {
             const mName = this.content.merchantNames[Math.floor(Math.random() * this.content.merchantNames.length)];
             let mNode = null;
             for (let attempt = 0; attempt < 5; attempt++) {
-                const candidate = Object.keys(this.state.world.nodes)[Math.floor(Math.random() * 53)];
+                const candidate = nodeKeys[Math.floor(Math.random() * nodeKeys.length)];
                 if (!this.state.world.nodes[candidate].garrison_id) {
                     mNode = candidate;
                     break;
@@ -225,50 +226,50 @@ class Engine {
         const actors = this.state.world.actors;
         const emperor = actors.find(a => a.id === this.state.world.emperorId);
 
-        // ===== PHASE 1: DAILY SUPPLY CONSUMPTION =====
-        // All actors pay daily costs and potentially consume grain
+        // ===== PHASE 1: GRAIN-BASED MAINTENANCE (identical for all actors + player) =====
+        // Troops eat grain. Gold is never consumed for maintenance — only for hiring.
+        // Consumption rate: 1 grain per 10 troops per day.
+        const grainPerTroopPerDay = (strength) => Math.max(1, Math.ceil(strength / 100));
+
+        // --- Actors ---
         actors.forEach(actor => {
             if (actor.state === 'dead') return;
-
-            // Each troop costs ~2 gold per day (actor.strength is approx troop count)
-            const dailyExpense = Math.ceil(actor.strength / 500) * actor.daily_cost;
-            
-            if (actor.wealth >= dailyExpense) {
-                // Can afford expenses: pay normally
-                actor.wealth -= dailyExpense;
-            } else {
-                // Cannot afford: consume grain at 2x rate + lose morale
-                const shortfall = dailyExpense - actor.wealth;
-                actor.wealth = 0;
-                actor.grain -= shortfall * 2;  // Double consumption penalty
-                actor.morale -= 3;
-                
-                if (actor.grain < 0) {
-                    actor.grain = 0;
-                    actor.morale -= 5;  // Starvation panic
-                    actor.supply_level = 0;
-                } else {
-                    actor.supply_level = Math.min(1.0, actor.grain / (actor.strength / 100));
-                }
+            const consumed = grainPerTroopPerDay(actor.strength) * days;
+            // Draw from home province first (garrisoned supply)
+            const actorNode = nodes[actor.node];
+            if (actorNode && actorNode.grain > 0) {
+                const drawn = Math.min(actorNode.grain, consumed);
+                actorNode.grain -= drawn;
+                actor.grain += drawn;
             }
+            actor.grain -= consumed;
+            if (actor.grain <= 0) {
+                actor.grain = 0;
+                actor.morale = Math.max(0, actor.morale - 5 * days);
+                if (actor.morale <= 20) {
+                    const lost = Math.floor(actor.strength * 0.05 * days);
+                    actor.strength = Math.max(0, actor.strength - lost);
+                }
+            } else {
+                actor.morale = Math.min(100, actor.morale + days);
+            }
+            if (actor.strength <= 0) actor.state = 'dead';
         });
 
-        // Player legion supply check
-        this.state.player.wealth -= Math.ceil(this.state.player.strength / 500) * this.state.player.daily_cost;
-        if (this.state.player.wealth < 0) {
-            const shortfall = Math.abs(this.state.player.wealth);
-            this.state.player.grain -= shortfall * 2;
-            this.state.player.morale -= 3;
-            this.state.player.wealth = 0;
-            this.print("WARNING: Low on funds! Your legion is consuming grain reserves.", "error-text");
-        }
-        if (this.state.player.grain < 0) {
+        // --- Player (same rules) ---
+        const playerConsumed = grainPerTroopPerDay(this.state.player.strength) * days;
+        this.state.player.grain -= playerConsumed;
+        if (this.state.player.grain <= 0) {
             this.state.player.grain = 0;
-            this.state.player.morale -= 5;
-            this.print("STARVATION! Your legion is starving!", "error-text");
-            const attrition = Math.floor(this.state.player.strength * 0.1);
-            this.state.player.strength -= attrition;
-            this.print(`You lost ${attrition} men to starvation.`, "error-text");
+            this.state.player.morale = Math.max(0, this.state.player.morale - 5 * days);
+            this.print(`STARVATION: Your legion lacks grain! Morale: ${this.state.player.morale}%`, "error-text");
+            if (this.state.player.morale <= 20) {
+                const deserters = Math.floor(this.state.player.strength * 0.05 * days);
+                this.state.player.strength = Math.max(0, this.state.player.strength - deserters);
+                if (deserters > 0) this.print(`${deserters} men deserted. Strength: ${this.state.player.strength}`, "error-text");
+            }
+        } else {
+            this.state.player.morale = Math.min(100, this.state.player.morale + days);
         }
         if (this.state.player.strength <= 0) {
             this.print("Your legion has been entirely wiped out. GAME OVER.", "error-text");
@@ -347,6 +348,34 @@ class Engine {
             playerIncome += playerCut;
         });
         this.state.player.wealth += playerIncome;
+
+        // ===== TRADE ROUTE INCOME =====
+        // Adjacent player-controlled provinces generate passive trade income
+        const playerNodes = Object.values(nodes).filter(n => n.realm === 'player');
+        let tradeIncome = 0;
+        playerNodes.forEach(n => {
+            const adjacent = n.neighbors.filter(nId => nodes[nId] && nodes[nId].realm === 'player');
+            tradeIncome += adjacent.length * 5; // 5 gold per connected player province
+        });
+        if (tradeIncome > 0) {
+            this.state.player.wealth += tradeIncome;
+            if (this.state.day % 10 === 0) {
+                this.print(`Trade income: +${tradeIncome} gold from your realm's internal trade.`, "intel-text");
+            }
+        }
+
+        // Subordinate 'tax' order: collect taxes from their current province
+        this.state.player.subordinates.forEach(subId => {
+            const sub = actors.find(a => a.id === subId);
+            if (!sub || sub.state === 'dead' || sub.orders !== 'tax') return;
+            const subNode = nodes[sub.node];
+            if (!subNode || subNode.realm !== 'player') return;
+            const taxCollected = Math.floor(subNode.wealth * 0.1);
+            sub.wealth += Math.floor(taxCollected * 0.7);
+            this.state.player.wealth += Math.floor(taxCollected * 0.3);
+            subNode.wealth -= taxCollected;
+            subNode.unrest += 8;
+        });
 
         // ===== PHASE 4: SUBORDINATE AI & LOYALTY =====
         this.state.player.subordinates.forEach(subId => {
@@ -448,63 +477,100 @@ class Engine {
                 }
             }
 
-            // Rival AI: March toward Rome
+            // Rival AI: Phase-based strategy — consolidate a local realm first, march on Rome only when ready
             if (actor.type === 'rival' && actor.state === 'marching') {
-                // Rivals need supplies too
-                if (actor.strength > 2000 && actor.wealth > 200) {
-                    actor.strength += Math.floor(Math.random() * 30);  // Slow recruitment
+                if (!actor.phase) actor.phase = 'consolidate';
+
+                // Recruitment (gold → troops), same rate as player
+                if (actor.wealth > 200 && actor.morale > 50 && Math.random() < 0.3) {
+                    const spend = Math.min(actor.wealth - 100, 500);
+                    const recruits = Math.floor(spend / 10); // 10 gold per troop
+                    actor.strength += recruits;
+                    actor.wealth -= spend;
                 }
 
-                // Movement toward Rome
-                if (actor.node !== this.state.world.romeNode) {
-                    const nextStep = this.findNextStepTo(actor.node, this.state.world.romeNode);
-                    if (nextStep) actor.node = nextStep;
-                }
+                const emperorStr = emperor && emperor.state !== 'dead' ? emperor.strength : 0;
 
-                const node = nodes[actor.node];
-                
-                // Can only take territory if garrison is weak or gone
-                const garrisonId = node.garrison_id;
-                const garrison = garrisonId ? actors.find(a => a.id === garrisonId) : null;
-                
-                if (node.realm !== actor.realm && (!garrison || garrison.strength < actor.strength * 0.8)) {
-                    node.realm = actor.realm;
-                    node.unrest = 0;
-                    node.garrison_id = actor.id;
-                    actor.subordinates = [];  // Admin garrison
-                }
+                if (actor.phase === 'consolidate') {
+                    // Expand locally — prefer unowned or weak adjacent provinces
+                    const currNode = nodes[actor.node];
+                    const localTargets = currNode.neighbors.filter(nId => {
+                        const n = nodes[nId];
+                        if (!n) return false;
+                        if (n.realm === actor.realm) return false;
+                        if (n.realm === 'player') return false;
+                        const g = n.garrison_id ? actors.find(a => a.id === n.garrison_id) : null;
+                        return !g || g.strength < actor.strength * 0.8;
+                    });
+                    if (localTargets.length > 0 && Math.random() < 0.6) {
+                        const pick = localTargets[Math.floor(Math.random() * localTargets.length)];
+                        actor.node = pick;
+                        nodes[pick].realm = actor.realm;
+                        nodes[pick].garrison_id = actor.id;
+                        nodes[pick].garrison_strength = actor.strength;
+                    }
+                    // Graduate to march phase: own 3+ provinces AND strong enough to challenge Rome
+                    const ownedCount = Object.values(nodes).filter(n => n.realm === actor.realm).length;
+                    if (ownedCount >= 3 && actor.strength > emperorStr * 0.7 && actor.grain > actor.strength / 50) {
+                        actor.phase = 'march';
+                        this.print(`INTEL: ${actor.name} has consolidated power and is marching on Rome!`, 'intel-text');
+                    }
 
-                // Combat at Rome
-                if (actor.node === this.state.world.romeNode && emperor && emperor.state !== 'dead') {
-                    if (actor.strength > emperor.strength) {
-                        this.print(`CRITICAL: ${actor.name} has DEFEATED the Emperor and taken Rome!`, "intel-text");
-                        emperor.state = 'dead';
-                        actor.type = 'emperor';
-                        actor.realm = 'emperor';
-                        this.state.world.emperorId = actor.id;
-                        actor.state = 'idle';
-                    } else {
-                        this.print(`INTEL: ${actor.name} assaulted Rome but was repelled.`, "intel-text");
-                        actor.state = 'dead';
-                        emperor.strength -= Math.floor(actor.strength * 0.4);
-                        emperor.morale += 10;
+                } else { // actor.phase === 'march'
+                    // Only advance if well-supplied
+                    if (actor.grain > actor.strength / 100 && Math.random() < 0.5) {
+                        if (actor.node !== this.state.world.romeNode) {
+                            const nextStep = this.findNextStepTo(actor.node, this.state.world.romeNode);
+                            if (nextStep) {
+                                actor.node = nextStep;
+                                const n = nodes[nextStep];
+                                const g = n.garrison_id ? actors.find(a => a.id === n.garrison_id) : null;
+                                if (n.realm !== actor.realm && (!g || g.strength < actor.strength * 0.8)) {
+                                    n.realm = actor.realm;
+                                    n.garrison_id = actor.id;
+                                    n.garrison_strength = actor.strength;
+                                }
+                            }
+                        }
+                    } else if (actor.grain <= actor.strength / 100) {
+                        // Pillage current province to resupply
+                        const n = nodes[actor.node];
+                        if (n.grain > 0) {
+                            const take = Math.min(n.grain, Math.ceil(actor.strength / 50));
+                            actor.grain += take;
+                            n.grain -= take;
+                        }
+                    }
+
+                    // Combat at Rome
+                    if (actor.node === this.state.world.romeNode && emperor && emperor.state !== 'dead') {
+                        if (actor.strength > emperor.strength) {
+                            this.print(`CRITICAL: ${actor.name} has DEFEATED the Emperor and taken Rome!`, "intel-text");
+                            emperor.state = 'dead';
+                            actor.type = 'emperor';
+                            actor.realm = 'emperor';
+                            this.state.world.emperorId = actor.id;
+                            actor.state = 'idle';
+                        } else {
+                            this.print(`INTEL: ${actor.name} assaulted Rome but was repelled.`, "intel-text");
+                            actor.strength = Math.floor(actor.strength * 0.5);
+                            actor.phase = 'consolidate'; // Fall back and regroup
+                            emperor.strength -= Math.floor(actor.strength * 0.3);
+                        }
                     }
                 }
             }
 
-            // Barbarian AI
+            // Barbarian AI: raid and pillage — carve out a border realm, do NOT beeline Rome
             if (actor.type === 'barbarian' && actor.state === 'marching') {
-                // Barbarians have NO income source - must live off pillage and grain captures
-                // If low on supplies, they lose strength
-                if (actor.grain < (actor.strength / 50)) {
-                    actor.strength -= Math.ceil(actor.strength * 0.05);
-                    actor.morale -= 5;
-                }
+                // Grain-based starvation (same as player)
+                // (grain already handled in Phase 1 above; this just checks morale outcome)
 
-                // Slow recruitment hungry hordes
-                if (actor.grain > (actor.strength / 100) && actor.wealth > 100) {
-                    actor.strength += 20 + Math.floor(Math.random() * 80);
-                    actor.wealth -= 50;
+                // Grow horde when well-fed (gold → recruits)
+                if (actor.grain > actor.strength / 80 && actor.wealth > 100 && Math.random() < 0.4) {
+                    const spend = Math.min(actor.wealth - 50, 300);
+                    actor.strength += Math.floor(spend / 10);
+                    actor.wealth -= spend;
                 }
 
                 // Movement: prefer non-horde realms
@@ -616,7 +682,7 @@ class Engine {
                     strength: 1200 + Math.floor(Math.random() * 2400), wealth: 150,
                     grain: 100, supply_level: 0.8, morale: 70,
                     daily_cost: 10, loyalty: 50, ambition: 100, martial: 3 + Math.floor(Math.random() * 4),
-                    personality: 'aggressive', state: 'marching', subordinates: [], superior: null,
+                    personality: this.content.personalities[Math.floor(Math.random() * this.content.personalities.length)], state: 'marching', subordinates: [], superior: null,
                     garrison_id: null
                 };
                 actors.push(rebel);
@@ -649,7 +715,8 @@ class Engine {
         if (Math.random() < 0.05) {
             const bIdx = Math.floor(Math.random() * this.content.barbarianNames.length);
             const bName = this.content.barbarianNames[bIdx];
-            const edgeNodes = ['britannia', 'belgica', 'germania_superior', 'raetia', 'dacia', 'moesia_inferior', 'pontus', 'mesopotamia', 'arabia', 'tingitana'].filter(n => nodes[n]);
+            // Use actual province IDs from roman_map.js
+            const edgeNodes = ['britannia', 'belgica', 'germania_superior', 'raetia', 'dacia', 'moesia_inferior', 'bithynia_et_pontus', 'armenia_mesopotamia', 'arabia', 'mauretania_tingitana'].filter(n => nodes[n]);
             if (edgeNodes.length > 0) {
                 const spawnNode = edgeNodes[Math.floor(Math.random() * edgeNodes.length)];
                 actors.push({
@@ -781,6 +848,8 @@ class Engine {
             if (this.combatState.conquering) {
                 const node = this.state.world.nodes[this.state.player.node];
                 node.realm = 'player';
+                node.garrison_id = 'player';
+                node.garrison_strength = this.state.player.strength;
                 this.print(`You have conquered ${node.name}! It is now part of your realm.`, "room");
             }
             
@@ -826,7 +895,7 @@ class Engine {
 
         switch (verb) {
             case 'help':
-                this.print("COMMANDS:\n- look | l\n- march [province name or id]\n- conquer\n- tax | extort\n- market buy\n- recruit [actor name]\n- subordinates\n- status [subordinate name]\n- command [subordinate name] [action]");
+                this.print("COMMANDS:\n- look | l\n- wait [days]\n- rest (200 grain → morale)\n- march [province]\n- conquer | tax | extort\n- muster [troops] (10g/troop → more men)\n- market buy (100g → 200 grain) | market sell [amount] (grain → gold)\n- recruit [actor name] (bribe a general, 500g)\n- subordinates | status [name]\n- command [name] [march/conquer/tax/hold]");
                 break;
             case 'look':
             case 'l':
@@ -859,8 +928,32 @@ class Engine {
                 break;
             case 'market':
                 if (args[1] === 'buy') this.marketBuy();
-                else this.print("Use: market buy (Costs 100 gold for 50 supplies)");
+                else if (args[1] === 'sell') this.marketSell(parseInt(args[2]) || 0);
+                else this.print("Use: market buy | market sell [grain amount]");
                 break;
+            case 'wait': {
+                const waitDays = Math.min(30, Math.max(1, parseInt(args[1]) || 1));
+                this.print(`You wait ${waitDays} day${waitDays > 1 ? 's' : ''}...`);
+                this.passTime(waitDays);
+                if (!this.state.flags.game_over) this.look();
+                break;
+            }
+            case 'rest':
+                this.rest();
+                break;
+            case 'muster': {
+                const amount = Math.max(1, parseInt(args[1]) || 100);
+                const cost = amount * 10;
+                if (this.state.player.wealth < cost) {
+                    this.print(`You need ${cost} gold to muster ${amount} men. (You have ${this.state.player.wealth}g)`, 'error-text');
+                } else {
+                    this.state.player.wealth -= cost;
+                    this.state.player.strength += amount;
+                    this.print(`You spend ${cost} gold to muster ${amount} men. Strength: ${this.state.player.strength}.`);
+                    this.passTime(1);
+                }
+                break;
+            }
             case 'recruit':
                 this.recruit(args.slice(1).join(" "));
                 break;
@@ -912,6 +1005,8 @@ class Engine {
             this.combatState.conquering = true;
         } else {
             node.realm = 'player';
+            node.garrison_id = 'player';
+            node.garrison_strength = this.state.player.strength;
             this.print(`You easily occupy the undefended province of ${node.name}.`, "room");
             this.passTime(1);
         }
@@ -938,14 +1033,23 @@ class Engine {
         node.wealth -= collected;
         node.unrest += 50;
         this.print(`Your legion brutally extorts the locals for ${collected} gold! Massive unrest!`);
+        // Track diplomacy — locals remember extortion
+        const localActor = this.state.world.actors.find(a => a.node === node.id && a.state !== 'dead' && a.id !== 'player');
+        if (localActor) {
+            if (!this.state.player.diplomacy) this.state.player.diplomacy = {};
+            const rel = this.state.player.diplomacy[localActor.id] || { relation: 'neutral', trust: 50 };
+            rel.trust = Math.max(0, (rel.trust || 50) - 30);
+            rel.relation = rel.trust < 20 ? 'hostile' : 'distrustful';
+            this.state.player.diplomacy[localActor.id] = rel;
+        }
         this.passTime(1);
     }
 
     marketBuy() {
         if (this.state.player.wealth >= 100) {
             this.state.player.wealth -= 100;
-            this.state.player.supplies += 50;
-            this.print("You bought 50 supplies for 100 gold.");
+            this.state.player.grain += 200;
+            this.print("You bought 200 grain for 100 gold.");
             this.passTime(1);
         } else {
             this.print("You don't have enough gold (Need 100).", "error-text");
@@ -970,7 +1074,7 @@ class Engine {
             return;
         }
         
-        if (target.type === 'subordinate') {
+        if (this.state.player.subordinates.includes(target.id)) {
             this.print("This general is already under your command!", "error-text");
             return;
         }
@@ -982,6 +1086,9 @@ class Engine {
             target.loyalty = 70 + Math.floor(Math.random() * 30);
             target.subordinates = target.subordinates || [];
             this.state.player.subordinates.push(target.id);
+            // Track diplomacy
+            if (!this.state.player.diplomacy) this.state.player.diplomacy = {};
+            this.state.player.diplomacy[target.id] = { relation: 'subordinate', trust: target.loyalty, since: this.state.day };
             this.print(`You spent 500 gold. ${target.name} is now your subordinate general!`, "room");
             this.print(`${target.name}'s Strength: ${target.strength}, Loyalty: ${target.loyalty}`, "intel-text");
         } else {
@@ -1055,4 +1162,73 @@ class Engine {
             this.print("Use: command [name] [march [province] | conquer | tax | hold]", "error-text");
         }
     }
+
+    rest() {
+        const grainCost = 200;
+        if (this.state.player.grain < grainCost) {
+            this.print(`You need at least ${grainCost} grain to rest properly. (market buy to restock)`, "error-text");
+            return;
+        }
+        this.state.player.grain -= grainCost;
+        const moraleGain = Math.min(30, 100 - this.state.player.morale);
+        this.state.player.morale = Math.min(100, this.state.player.morale + moraleGain);
+        this.print(`Your legion rests and recuperates. Morale +${moraleGain}. (${grainCost} grain consumed.)`);
+        this.passTime(3);
+        if (!this.state.flags.game_over) this.look();
+    }
+
+    marketSell(amount) {
+        if (!amount || amount <= 0) {
+            this.print("Specify an amount: market sell [grain amount]", "error-text");
+            return;
+        }
+        if (this.state.player.grain < amount) {
+            this.print(`You only have ${this.state.player.grain} grain to sell.`, "error-text");
+            return;
+        }
+        const gold = amount * 2;
+        this.state.player.grain -= amount;
+        this.state.player.wealth += gold;
+        this.print(`Sold ${amount} grain for ${gold} gold at market rates.`);
+        this.passTime(1);
+    }
+
+    checkObjectives() {
+        if (!this.state.player.objectives) this.state.player.objectives = [];
+
+        const playerProvinces = Object.values(this.state.world.nodes).filter(n => n.realm === 'player');
+        const controlsRome = this.state.world.nodes['i'] && this.state.world.nodes['i'].realm === 'player';
+        const subCount = this.state.player.subordinates.length;
+        const emperor = this.state.world.actors.find(a => a.id === this.state.world.emperorId);
+        const emperorDead = !emperor || emperor.state === 'dead';
+
+        const definitions = [
+            { id: 'seize_rome',    label: 'Seize Rome (Latium et Campania)',    done: controlsRome },
+            { id: 'ten_provinces', label: 'Control 10 Provinces',               done: playerProvinces.length >= 10 },
+            { id: 'defeat_emp',    label: 'Defeat the Emperor in Battle',        done: emperorDead },
+            { id: 'three_generals',label: 'Command 3 Subordinate Generals',      done: subCount >= 3 },
+            { id: 'wealthy',       label: 'Accumulate 10,000 Gold',             done: this.state.player.wealth >= 10000 },
+        ];
+
+        definitions.forEach(def => {
+            const existing = this.state.player.objectives.find(o => o.id === def.id);
+            if (!existing) {
+                this.state.player.objectives.push({ ...def });
+            } else if (!existing.done && def.done) {
+                existing.done = true;
+                this.print(`★ OBJECTIVE COMPLETE: ${def.label}`, 'room');
+            } else {
+                existing.done = def.done;
+                existing.label = def.label;
+            }
+        });
+    }
+}
+
+// Helper: smart 2-4 char abbreviation for province labels on the map
+function abbreviateProvince(name) {
+    const stop = new Set(['et', 'at', 'de', 'del', 'el', 'und', 'and']);
+    const words = name.split(/[\s&]+/).filter(w => w.length > 0 && !stop.has(w.toLowerCase()));
+    if (words.length === 1) return name.substring(0, 4).toUpperCase();
+    return words.map(w => w[0]).join('').toUpperCase();
 }

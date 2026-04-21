@@ -39,7 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateUICallback(state) {
         uiLegion.innerHTML = `<strong>Strength:</strong> ${state.player.strength} men<br><strong>Morale:</strong> ${state.player.morale}%<br><strong>Subordinates:</strong> ${state.player.subordinates.length}`;
-        uiResources.innerHTML = `<strong>Wealth:</strong> ${state.player.wealth} gold<br><strong>Supplies:</strong> ${state.player.supplies} units`;
+        uiResources.innerHTML = `<strong>Wealth:</strong> ${state.player.wealth} gold<br><strong>Grain:</strong> ${state.player.grain} bushels`;
         
         if (state.world && state.world.nodes && Object.keys(state.world.nodes).length > 0) {
             
@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     text.setAttribute("font-weight", "bold");
                     text.setAttribute("fill", "rgba(0,0,0,0.7)");
                     text.setAttribute("pointer-events", "none");
-                    text.textContent = node.name.substring(0, 3).toUpperCase();
+                    text.textContent = abbreviateProvince(node.name);
                     svg.appendChild(text);
                 }
                 minimap.appendChild(svg);
@@ -156,6 +156,11 @@ document.addEventListener('DOMContentLoaded', () => {
             uiEconomy.innerHTML += `<em>Local Province Data:</em><br>`;
             uiEconomy.innerHTML += `Wealth: ${currentNode.wealth}<br>`;
             uiEconomy.innerHTML += `Unrest: ${currentNode.unrest}%<br>`;
+            uiEconomy.innerHTML += `Grain Stockpile: ${currentNode.grain || 0}<br>`;
+            uiEconomy.innerHTML += `Grain Production: +${currentNode.grain_production || 0}/day<br>`;
+            uiEconomy.innerHTML += `<br><em>Your Army:</em><br>`;
+            uiEconomy.innerHTML += `Grain: ${state.player.grain} bushels<br>`;
+            uiEconomy.innerHTML += `Daily Cost: ${state.player.daily_cost} gold<br>`;
         }
     }
 
@@ -191,6 +196,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const reader = new FileReader();
         reader.onload = (ev) => {
             try {
+                mapInitialized = false;   // Reset so map re-renders with loaded state
+                minimap.innerHTML = '';   // Clear old SVG
                 engine.loadState(JSON.parse(ev.target.result));
                 outputCallback("Game loaded.", "intel-text");
             } catch (err) {
