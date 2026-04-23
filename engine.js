@@ -19,11 +19,50 @@ class Engine {
     loadState(saveData) {
         this.state = saveData;
         this.look();
+        // Small loyalty drift each tick: ambition erodes loyalty slowly
+        try {
+            this.state.world.actors.forEach(a => {
+                if (!a || a.state === 'dead') return;
+                const ambition = a.ambition || 0;
+                const decay = Math.floor(ambition / 60);
+                if (!a.loyalty) a.loyalty = 50;
+                a.loyalty = Math.max(0, a.loyalty - decay - (Math.random() < 0.03 ? 1 : 0));
+            });
+        } catch (e) {
+            console.error('Loyalty drift error', e);
+        }
+
+        // Allow the emperor and senate to act on vacancies or perform maintenance
+        try {
+            this.processSenateIfNeeded();
+        } catch (e) {
+            console.error('Error processing senate:', e);
+        }
+        try {
+            this.emperorActions();
+        } catch (e) {
+            console.error('Error in emperor actions:', e);
+        }
+
         this.updateUI();
     }
 
     getSaveData() {
         return this.state;
+    }
+
+    // Return actor object by id; supports the special 'player' pseudo-actor
+    getActorById(id) {
+        if (!id) return null;
+        if (id === 'player') {
+            // Return a lightweight actor-like view of the player
+            const p = this.state.player;
+            return {
+                id: 'player', name: p.name || 'You', node: p.node, realm: 'player', strength: p.strength, wealth: p.wealth,
+                grain: p.grain, loyalty: p.loyalty, martial: p.martial || 3, morale: p.morale
+            };
+        }
+        return this.state.world.actors.find(a => a.id === id) || null;
     }
 
     generateWorld() {
@@ -74,26 +113,41 @@ class Engine {
         this.state.world.nodes[emperor.node].garrison_strength = emperor.strength;
 
         // 3. Spawn Imperial Bureaucracy (hierarchical)
-        const regionalGovs = new Map();
-        for (const [id, node] of Object.entries(this.state.world.nodes)) {
-            if (node.realm === 'emperor' && id !== emperor.node && Math.random() < 0.25) {
-                const gName = this.content.romanNames[Math.floor(Math.random() * this.content.romanNames.length)];
-                const pers = this.content.personalities[Math.floor(Math.random() * this.content.personalities.length)];
-                const gov = {
-                    id: this.generateId(), type: 'governor', name: `${gName}`,
-                    node: id, realm: 'emperor', faction: 'emperor',
-                    strength: 400 + Math.floor(Math.random() * 1200), wealth: 300 + Math.floor(Math.random() * 400), grain: 300,
-                    loyalty: 50 + Math.floor(Math.random() * 50), ambition: Math.floor(Math.random() * 100),
-                    martial: 2 + Math.floor(Math.random() * 5), personality: pers, state: 'idle',
-                    subordinates: [], superior: emperor.id, orders: 'hold',
-                    daily_cost: 20, supply_level: 1.0, morale: 80
-                };
-                this.state.world.actors.push(gov);
-                emperor.subordinates.push(gov.id);
-                node.garrison_id = gov.id;
-                node.garrison_strength = gov.strength;
+            const regionalGovs = new Map();
+            for (const [id, node] of Object.entries(this.state.world.nodes)) {
+                if (node.realm === 'emperor' && id !== emperor.node && Math.random() < 0.25) {
+                    const gName = this.content.romanNames[Math.floor(Math.random() * this.content.romanNames.length)];
+                    const pers = this.content.personalities[Math.floor(Math.random() * this.content.personalities.length)];
+                    const gov = {
+                        id: this.generateId(), type: 'governor', name: `${gName}`,
+                        node: id, realm: 'emperor', faction: 'emperor',
+                        strength: 400 + Math.floor(Math.random() * 1200), wealth: 300 + Math.floor(Math.random() * 400), grain: 300,
+                        loyalty: 50 + Math.floor(Math.random() * 50), ambition: Math.floor(Math.random() * 100),
+                        martial: 2 + Math.floor(Math.random() * 5), personality: pers, state: 'idle',
+                        subordinates: [], superior: emperor.id, orders: 'hold',
+                        daily_cost: 20, supply_level: 1.0, morale: 80
+                    };
+                    this.state.world.actors.push(gov);
+                    emperor.subordinates.push(gov.id);
+                    node.garrison_id = gov.id;
+                    node.garrison_strength = gov.strength;
+                }
             }
-        }
+
+            // Initialize Senate from some of the imperial governors (if any)
+            this.state.world.senate = [];
+            const govs = this.state.world.actors.filter(a => a.type === 'governor');
+            if (govs.length > 0) {
+                // pick up to 6 governors as senators, prefer higher wealth/strength
+                govs.sort((a,b) => ((b.wealth||0) + (b.strength||0)/2) - ((a.wealth||0) + (a.strength||0)/2));
+                const senateSize = Math.min(6, Math.max(3, Math.floor(govs.length / 3)));
+                for (let i = 0; i < senateSize && i < govs.length; i++) {
+                    const s = govs[i];
+                    s.isSenator = true;
+                    s.influence = (s.wealth || 1000) / 1000 + (s.strength || 1000) / 2000;
+                    this.state.world.senate.push(s.id);
+                }
+            }
         
         // 4. Spawn Rival Factions
         const rivalCount = Math.floor(2 + Math.random() * 3);
@@ -141,11 +195,12 @@ class Engine {
             const merchant = {
                 id: this.generateId(), type: 'merchant', name: `${mName}`,
                 node: mNode, realm: 'independent', faction: 'merchant',
-                strength: 200 + Math.floor(Math.random() * 300), wealth: 2000 + Math.floor(Math.random() * 1000), grain: 600,
-                loyalty: 0, ambition: 60, martial: 1,
+                strength: 0, wealth: 2000 + Math.floor(Math.random() * 1000), grain: 600,
+                cargo: 0, cargo_capacity: 300,
+                loyalty: 0, ambition: 60, martial: 0,
                 personality: 'pragmatic', state: 'trading', subordinates: [],
                 orders: 'trade', trade_networks: [],
-                daily_cost: 10, supply_level: 1.0, morale: 80
+                daily_cost: 5, supply_level: 1.0, morale: 80
             };
             this.state.world.actors.push(merchant);
         }
@@ -308,7 +363,7 @@ class Engine {
                 const gov = actors.find(a => a.id === subId);
                 if (!gov) return;
                 const govNode = nodes[gov.node];
-                
+
                 // Governor collects 10% base but personality modifies
                 let taxRate = 0.10;
                 if (gov.personality === 'corrupt') taxRate = 0.15;
@@ -316,14 +371,15 @@ class Engine {
                 else if (gov.personality === 'loyal') taxRate = 0.12;
 
                 const collected = Math.floor(govNode.wealth * taxRate);
-                gov.wealth += collected;
+                // Governor takes a local cut; remainder forwarded to emperor
+                const governorCut = Math.floor(collected * 0.5);
+                const forwarded = collected - governorCut;
+
+                gov.wealth += governorCut;
                 govNode.wealth -= collected;
                 govNode.unrest += taxRate * 5;  // Taxation causes unrest
-                
-                // Governor takes cut to self, remainder to emperor
-                const imperialCut = Math.floor(collected * 0.5);
-                gov.wealth += imperialCut;
-                emperorIncome += imperialCut;
+
+                emperorIncome += forwarded;
             });
             emperor.wealth += emperorIncome;
         }
@@ -393,12 +449,21 @@ class Engine {
             // Conquer orders
             if (sub.orders === 'conquer' && node.realm !== 'player') {
                 const defender = actors.find(a => a.node === node.id && a.state !== 'dead' && a.realm !== 'player');
-                if (defender && defender.strength > sub.strength * 0.8) {
-                    sub.strength -= Math.floor(defender.strength * 0.3);
-                    sub.morale -= 10;
-                    if (sub.strength <= 0) sub.state = 'dead';
+                if (defender) {
+                    // Simulate a battle between subordinate and defender
+                    const result = this.simulateBattle(sub, defender);
+                    if (result === 'attacker') {
+                        node.realm = 'player';
+                        node.garrison_id = sub.id;
+                        node.garrison_strength = sub.strength;
+                        this.print(`${sub.name} has conquered ${node.name} for your realm after battle!`, 'intel-text');
+                    }
+                    // clear orders regardless of result
+                    sub.orders = null;
                 } else {
                     node.realm = 'player';
+                    node.garrison_id = sub.id;
+                    node.garrison_strength = sub.strength;
                     this.print(`${sub.name} has conquered ${node.name} for your realm!`, 'intel-text');
                     sub.orders = null;
                 }
@@ -439,7 +504,235 @@ class Engine {
 
         // ===== PHASE 5: GOVERNOR & ACTOR AI =====
         actors.forEach(actor => {
-            if (actor.state === 'dead' || actor.type === 'player') return;
+            if (actor.state === 'dead') return;
+
+            // Lightweight autonomy decision: give idle actors simple goals
+            // so they act without being micromanaged.
+            if (!actor.orders) {
+                if (actor.type === 'governor') actor.orders = 'admin';
+                else if (actor.type === 'rival') actor.orders = Math.random() < 0.6 ? 'consolidate' : 'march_to_rome';
+                else if (actor.type === 'barbarian') actor.orders = 'raid';
+                else if (actor.type === 'merchant') actor.orders = 'trade';
+                else if (actor.type === 'brigand') actor.orders = 'raid';
+            }
+
+            // Quick threat-scan for non-merchant actors: respond to nearby barbarians
+            try {
+                if (['subordinate','rival','governor'].includes(actor.type)) {
+                    const node = this.state.world.nodes[actor.node];
+                    if (node && node.neighbors && node.neighbors.length > 0) {
+                        const barb = node.neighbors.map(nid => actors.find(a => a.node === nid && a.type === 'barbarian' && a.state !== 'dead')).find(x => x);
+                        if (barb) {
+                            // If strong enough, engage; else try raising troops or hold
+                            if (actor.strength > (barb.strength || 0) * 0.6) {
+                                this.print(`${actor.name} moves to confront barbarian ${barb.name}.`, 'intel-text');
+                                this.simulateBattle(actor, barb);
+                            } else {
+                                if (actor.wealth > 100 && Math.random() < 0.5) {
+                                    const spend = Math.min(actor.wealth - 50, 150);
+                                    const recruits = Math.floor(spend / 10);
+                                    actor.strength += recruits;
+                                    actor.wealth -= spend;
+                                    this.print(`${actor.name} hastily raises ${recruits} men against barbarians.`, 'intel-text');
+                                } else {
+                                    actor.orders = 'hold';
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('threat-scan error', e);
+            }
+
+            // Subordinate-specific autonomy: scheming, competent, and helpful
+            if (actor.type === 'subordinate') {
+                try {
+                    const isPlayerSub = actor.superior === 'player' || actor.realm === 'player';
+                    const playerNode = this.state.player.node;
+                    const myNode = this.state.world.nodes[actor.node];
+
+                    // If allied to player and player is in combat nearby, rush to assist
+                    if (isPlayerSub && this.state.flags.in_combat && this.combatState && this.combatState.enemy) {
+                        const nearby = (actor.node === playerNode) || (myNode && myNode.neighbors && myNode.neighbors.includes(playerNode));
+                        if (nearby) {
+                            actor.node = playerNode;
+                            this.print(`${actor.name} rushes to assist you at ${this.state.world.nodes[playerNode].name}!`, 'intel-text');
+                            // Small pitched fight to weaken enemy before player's next move
+                            try {
+                                this.simulateBattle(actor, this.combatState.enemy);
+                            } catch (e) { console.error('assist-battle error', e); }
+                        }
+                    }
+
+                    // Subordinate self-recruit when wealthy
+                    if (actor.wealth > 250 && Math.random() < 0.18) {
+                        const spend = Math.min(actor.wealth - 50, 300);
+                        const recruits = Math.floor(spend / 10);
+                        if (recruits > 0) {
+                            actor.strength += recruits;
+                            actor.wealth -= spend;
+                            this.print(`${actor.name} recruits ${recruits} men autonomously.`, 'intel-text');
+                        }
+                    }
+
+                    // Patrol / expand for the player: take weak neighboring independents
+                    if (isPlayerSub && myNode && myNode.neighbors && Math.random() < 0.12) {
+                        const targets = myNode.neighbors.filter(nid => {
+                            const n = this.state.world.nodes[nid];
+                            if (!n) return false;
+                            if (n.realm === 'player' || n.realm === actor.realm) return false;
+                            const g = n.garrison_id ? this.getActorById(n.garrison_id) : null;
+                            return !g || g.strength < actor.strength * 0.7;
+                        });
+                        if (targets.length > 0) {
+                            const pick = targets[Math.floor(Math.random() * targets.length)];
+                            const tgtNode = this.state.world.nodes[pick];
+                            // If garrison present, fight
+                            const gId = tgtNode.garrison_id;
+                            const garrison = gId ? this.getActorById(gId) : null;
+                            if (garrison) {
+                                const res = this.simulateBattle(actor, garrison);
+                                if (res === 'attacker') {
+                                    tgtNode.realm = 'player';
+                                    tgtNode.garrison_id = actor.id;
+                                    tgtNode.garrison_strength = actor.strength;
+                                    this.print(`${actor.name} has seized ${tgtNode.name} for your realm.`, 'intel-text');
+                                }
+                            } else {
+                                tgtNode.realm = 'player';
+                                tgtNode.garrison_id = actor.id;
+                                tgtNode.garrison_strength = actor.strength;
+                                this.print(`${actor.name} occupies ${tgtNode.name} for your realm.`, 'intel-text');
+                            }
+                        }
+                    }
+
+                    // Small scheming: occasionally try to curry favor or bribe nearby senators/governors
+                    if (actor.loyalty > 40 && Math.random() < 0.05) {
+                        // deposit a small gift to player-coffers (simulates tax remittance)
+                        if (isPlayerSub && actor.wealth > 50) {
+                            const gift = Math.min(actor.wealth, 30 + Math.floor(Math.random() * 70));
+                            actor.wealth -= gift;
+                            this.state.player.wealth += Math.floor(gift * 0.6);
+                            actor.loyalty = Math.min(100, actor.loyalty + Math.floor(gift/25));
+                            this.print(`${actor.name} sends a discreet gift to you (+${Math.floor(gift/25)} loyalty).`, 'intel-text');
+                        }
+                    }
+
+                    // Ambition-driven plotting: slight chance to seek independent glory if loyalty low
+                    if (actor.loyalty < 30 && actor.ambition > 50 && Math.random() < 0.08) {
+                        actor.type = 'rival';
+                        actor.realm = `rival_${actor.name}`;
+                        actor.state = 'marching';
+                        this.print(`${actor.name} has quietly plotted to make a name for themselves...`, 'error-text');
+                    }
+                } catch (e) {
+                    console.error('subordinate autonomy error', e);
+                }
+            }
+
+            // React to simple orders immediately (movement or local actions)
+            try {
+                const curNode = this.state.world.nodes[actor.node];
+                if (actor.type === 'governor' && actor.orders === 'admin') {
+                    // Focus on local prosperity and unrest suppression
+                    if (curNode && curNode.unrest > 25) {
+                        curNode.unrest = Math.max(0, curNode.unrest - 4);
+                        actor.morale = Math.min(100, (actor.morale || 50) + 2);
+                    } else if (actor.wealth > 200 && Math.random() < 0.2) {
+                        actor.strength += 30 + Math.floor(Math.random() * 70);
+                        actor.wealth -= 100;
+                    }
+                }
+
+                if (actor.type === 'rival' && actor.orders === 'consolidate' && actor.state !== 'marching') {
+                    // Try to grab adjacent independent provinces before marching to Rome
+                    if (curNode && curNode.neighbors && curNode.neighbors.length > 0) {
+                        const targets = curNode.neighbors.filter(n => this.state.world.nodes[n] && this.state.world.nodes[n].realm === 'independent');
+                        if (targets.length > 0) {
+                            const pick = targets[Math.floor(Math.random() * targets.length)];
+                            actor.node = pick;
+                            const nodeObj = this.state.world.nodes[pick];
+                            // If there is a garrison, simulate battle; otherwise claim
+                            const gId = nodeObj.garrison_id;
+                            const garrison = gId ? this.getActorById(gId) : null;
+                            if (garrison) {
+                                const res = this.simulateBattle(actor, garrison);
+                                if (res === 'attacker') {
+                                    nodeObj.realm = actor.realm;
+                                    nodeObj.garrison_id = actor.id;
+                                    nodeObj.garrison_strength = actor.strength;
+                                }
+                            } else {
+                                nodeObj.realm = actor.realm;
+                                nodeObj.garrison_id = actor.id;
+                                nodeObj.garrison_strength = actor.strength;
+                            }
+                        } else {
+                            // No easy targets nearby, start marching
+                            actor.orders = 'march_to_rome';
+                            actor.state = 'marching';
+                        }
+                    }
+                }
+
+                if (actor.type === 'merchant' && actor.orders === 'trade') {
+                    // Merchants move grain between provinces and earn profit.
+                    if (curNode) {
+                        const surplus = Math.max(0, (curNode.grain || 0) - (curNode.grain_requirement || 50));
+                        if (surplus > 50 && actor.cargo < actor.cargo_capacity) {
+                            const take = Math.min(actor.cargo_capacity - actor.cargo, Math.floor(surplus / 2));
+                            actor.cargo += take;
+                            curNode.grain = Math.max(0, (curNode.grain || 0) - take);
+                            actor.wealth += Math.floor(take * 0.2); // small fee
+                        }
+
+                        // Move toward a neighbor with deficit
+                        const candidates = curNode.neighbors.filter(nId => {
+                            const n = this.state.world.nodes[nId];
+                            return n && ((n.grain || 0) < (n.grain_requirement || 50));
+                        });
+                        if (candidates.length > 0 && Math.random() < 0.7) {
+                            actor.node = candidates[Math.floor(Math.random() * candidates.length)];
+                        } else if (curNode.neighbors.length > 0 && Math.random() < 0.4) {
+                            actor.node = curNode.neighbors[Math.floor(Math.random() * curNode.neighbors.length)];
+                        }
+
+                        // Unload if destination needs grain
+                        const newNode = this.state.world.nodes[actor.node];
+                        if (actor.cargo > 0 && newNode && ((newNode.grain || 0) < (newNode.grain_requirement || 50))) {
+                            const unload = Math.min(actor.cargo, Math.max(10, (newNode.grain_requirement || 50) - (newNode.grain || 0)));
+                            actor.cargo -= unload;
+                            newNode.grain = (newNode.grain || 0) + unload;
+                            actor.wealth += Math.floor(unload * 0.5); // merchant profit on delivery
+                        }
+                    }
+                }
+
+                if ((actor.type === 'barbarian' || actor.type === 'brigand') && actor.orders === 'raid') {
+                    if (curNode && curNode.neighbors && curNode.neighbors.length > 0) {
+                        const targets = curNode.neighbors.filter(n => this.state.world.nodes[n] && this.state.world.nodes[n].realm !== actor.realm);
+                        if (targets.length > 0) {
+                            const tgt = targets[Math.floor(Math.random() * targets.length)];
+                            actor.node = tgt;
+                            const tgtNode = this.state.world.nodes[tgt];
+                            const loot = Math.floor(tgtNode.wealth * 0.15);
+                            actor.wealth += loot;
+                            tgtNode.wealth = Math.max(0, tgtNode.wealth - loot);
+                            const grainLoot = Math.floor((tgtNode.grain || 0) * 0.3);
+                            actor.grain = (actor.grain || 0) + grainLoot;
+                            tgtNode.grain = Math.max(0, (tgtNode.grain || 0) - grainLoot);
+                            tgtNode.unrest += 8;
+                        } else if (curNode.neighbors.length > 0) {
+                            actor.node = curNode.neighbors[Math.floor(Math.random() * curNode.neighbors.length)];
+                        }
+                    }
+                }
+            } catch (err) {
+                // Defensive: if something goes wrong here, don't break the turn loop
+                console.error('actor autonomy error', err);
+            }
 
             // Governor behaviors
             if (actor.type === 'governor') {
@@ -470,10 +763,64 @@ class Engine {
                     this.print(`INTEL: Governor ${actor.name} has rebelled and claimed ${node.name}!`, 'intel-text');
                 }
 
-                // Governors slowly recruit if wealthy
-                if (actor.wealth > 150 && Math.random() < 0.2) {
-                    actor.strength += 50 + Math.floor(Math.random() * 100);
-                    actor.wealth -= 100;
+                // React to nearby barbarian threats: attempt local defense or raise troops
+                try {
+                    const barbNearby = node.neighbors.map(nid => actors.find(a => a.node === nid && a.type === 'barbarian' && a.state !== 'dead')).find(x => x);
+                    if (barbNearby) {
+                        // If stronger, engage; otherwise, try to raise troops or hold
+                        if (actor.strength > (barbNearby.strength || 0) * 0.6) {
+                            this.print(`${actor.name} confronts barbarian ${barbNearby.name} near ${node.name}.`, 'intel-text');
+                            const res = this.simulateBattle(actor, barbNearby);
+                            if (res === 'attacker') {
+                                // Secure the neighbor province
+                                const bnode = this.state.world.nodes[barbNearby.node];
+                                if (bnode) {
+                                    bnode.realm = actor.realm;
+                                    bnode.garrison_id = actor.id;
+                                    bnode.garrison_strength = actor.strength;
+                                }
+                            } else {
+                                actor.morale = Math.max(0, (actor.morale || 50) - 15);
+                            }
+                        } else {
+                            // Try to muster modest reinforcements if possible
+                            if (actor.wealth > 150 && Math.random() < 0.6) {
+                                const spend = Math.min(actor.wealth - 50, 200);
+                                const recruits = Math.floor(spend / 10);
+                                actor.strength += recruits;
+                                actor.wealth -= spend;
+                                this.print(`${actor.name} raises ${recruits} men to face barbarians.`, 'intel-text');
+                            } else {
+                                actor.orders = 'hold';
+                                actor.morale = Math.max(0, (actor.morale || 50) - 5);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('barbarian reaction error', e);
+                }
+
+                // Governors slowly recruit if wealthy — occasionally create a subordinate commander
+                if (actor.wealth > 150 && Math.random() < 0.25) {
+                    if (actor.wealth > 400 && Math.random() < 0.25) {
+                        // Create a subordinate officer under this governor
+                        const subName = this.content.romanNames[Math.floor(Math.random() * this.content.romanNames.length)];
+                        const newSub = {
+                            id: this.generateId(), type: 'subordinate', name: `Legate ${subName}`,
+                            node: actor.node, realm: actor.realm, faction: actor.faction || actor.realm,
+                            strength: 200 + Math.floor(Math.random() * 300), wealth: 50,
+                            loyalty: 60 + Math.floor(Math.random() * 30), ambition: 30, martial: 2 + Math.floor(Math.random()*3),
+                            personality: 'pragmatic', state: 'idle', subordinates: [], superior: actor.id,
+                            daily_cost: 10, supply_level: 1.0, morale: 70
+                        };
+                        this.state.world.actors.push(newSub);
+                        actor.subordinates = actor.subordinates || [];
+                        actor.subordinates.push(newSub.id);
+                        actor.wealth -= 300;
+                    } else {
+                        actor.strength += 50 + Math.floor(Math.random() * 100);
+                        actor.wealth -= 100;
+                    }
                 }
             }
 
@@ -489,6 +836,23 @@ class Engine {
                     actor.wealth -= spend;
                 }
 
+                // Rivals may also raise subordinate commanders to garrison newly taken lands
+                if (actor.wealth > 600 && Math.random() < 0.12) {
+                    const rName = this.content.romanNames[Math.floor(Math.random() * this.content.romanNames.length)];
+                    const sub = {
+                        id: this.generateId(), type: 'subordinate', name: `Champion ${rName}`,
+                        node: actor.node, realm: actor.realm, faction: actor.faction || actor.realm,
+                        strength: 300 + Math.floor(Math.random() * 400), wealth: 80,
+                        loyalty: 50, ambition: 40, martial: 3 + Math.floor(Math.random()*3),
+                        personality: 'aggressive', state: 'idle', subordinates: [], superior: actor.id,
+                        daily_cost: 15, supply_level: 1.0, morale: 65
+                    };
+                    this.state.world.actors.push(sub);
+                    actor.subordinates = actor.subordinates || [];
+                    actor.subordinates.push(sub.id);
+                    actor.wealth -= 450;
+                }
+
                 const emperorStr = emperor && emperor.state !== 'dead' ? emperor.strength : 0;
 
                 if (actor.phase === 'consolidate') {
@@ -499,7 +863,7 @@ class Engine {
                         if (!n) return false;
                         if (n.realm === actor.realm) return false;
                         if (n.realm === 'player') return false;
-                        const g = n.garrison_id ? actors.find(a => a.id === n.garrison_id) : null;
+                        const g = n.garrison_id ? this.getActorById(n.garrison_id) : null;
                         return !g || g.strength < actor.strength * 0.8;
                     });
                     if (localTargets.length > 0 && Math.random() < 0.6) {
@@ -524,8 +888,8 @@ class Engine {
                             if (nextStep) {
                                 actor.node = nextStep;
                                 const n = nodes[nextStep];
-                                const g = n.garrison_id ? actors.find(a => a.id === n.garrison_id) : null;
-                                if (n.realm !== actor.realm && (!g || g.strength < actor.strength * 0.8)) {
+                                    const g = n.garrison_id ? this.getActorById(n.garrison_id) : null;
+                                    if (n.realm !== actor.realm && (!g || g.strength < actor.strength * 0.8)) {
                                     n.realm = actor.realm;
                                     n.garrison_id = actor.id;
                                     n.garrison_strength = actor.strength;
@@ -566,11 +930,12 @@ class Engine {
                 // Grain-based starvation (same as player)
                 // (grain already handled in Phase 1 above; this just checks morale outcome)
 
-                // Grow horde when well-fed (gold → recruits)
-                if (actor.grain > actor.strength / 80 && actor.wealth > 100 && Math.random() < 0.4) {
+                // Grow horde when well-fed (gold → recruits) — slowed and capped
+                if (actor.grain > actor.strength / 80 && actor.wealth > 100 && Math.random() < 0.2) {
                     const spend = Math.min(actor.wealth - 50, 300);
-                    actor.strength += Math.floor(spend / 10);
+                    actor.strength += Math.floor(spend / 20); // less efficient than before
                     actor.wealth -= spend;
+                    if (actor.strength > 5000) actor.strength = 5000; // hard cap
                 }
 
                 // Movement: prefer non-horde realms
@@ -588,18 +953,36 @@ class Engine {
 
                 const node = nodes[actor.node];
                 
-                // Pillar territory and capture grain
+                // Pillar territory and capture grain — if a garrison/owner exists, fight them
                 if (node.realm !== actor.realm && !node.realm.startsWith('horde')) {
-                    const plunder = Math.floor(node.wealth * 0.2);
-                    actor.wealth += plunder;
-                    node.wealth -= plunder;
-                    
-                    const grainCapture = Math.floor(node.grain * 0.5);
-                    actor.grain += grainCapture;
-                    node.grain -= grainCapture;
-                    
-                    node.realm = actor.realm;
-                    node.unrest = 0;
+                    const gId = node.garrison_id;
+                    const garrison = gId ? this.getActorById(gId) : null;
+                    if (garrison) {
+                        const res = this.simulateBattle(actor, garrison);
+                        if (res === 'attacker') {
+                            const plunder = Math.floor(node.wealth * 0.2);
+                            actor.wealth += plunder;
+                            node.wealth = Math.max(0, node.wealth - plunder);
+                            const grainCapture = Math.floor(node.grain * 0.5);
+                            actor.grain += grainCapture;
+                            node.grain = Math.max(0, node.grain - grainCapture);
+                            node.realm = actor.realm;
+                            node.unrest = 0;
+                            node.garrison_id = actor.id;
+                            node.garrison_strength = actor.strength;
+                        }
+                    } else {
+                        const plunder = Math.floor(node.wealth * 0.2);
+                        actor.wealth += plunder;
+                        node.wealth = Math.max(0, node.wealth - plunder);
+                        const grainCapture = Math.floor(node.grain * 0.5);
+                        actor.grain += grainCapture;
+                        node.grain = Math.max(0, node.grain - grainCapture);
+                        node.realm = actor.realm;
+                        node.unrest = 0;
+                        node.garrison_id = actor.id;
+                        node.garrison_strength = actor.strength;
+                    }
                 }
 
                 // Combat at Rome
@@ -694,14 +1077,14 @@ class Engine {
 
         // ===== PHASE 7: REALM COLLAPSE (only when garrison destroyed) =====
         actors.forEach(actor => {
-            if (actor.state === 'dead' && actor.garrison_id) {
-                // Find all nodes where this actor was garrison
+            if (actor.state === 'dead') {
+                // Clear any garrisons owned by this dead actor
                 for (const nodeId in nodes) {
                     const node = nodes[nodeId];
                     if (node.garrison_id === actor.id) {
                         node.garrison_id = null;
                         node.garrison_strength = 0;
-                        // Province reverts to independent ONLY if no other owner
+                        // Province reverts to independent ONLY if its realm matched the dead actor
                         if (node.realm === actor.realm) {
                             node.realm = 'independent';
                             node.unrest = Math.floor(Math.random() * 30);
@@ -712,7 +1095,8 @@ class Engine {
         });
 
         // ===== PHASE 8: BARBARIAN SPAWN =====
-        if (Math.random() < 0.05) {
+        // Spawn barbarians less frequently and with reduced initial strength
+        if (Math.random() < 0.02) {
             const bIdx = Math.floor(Math.random() * this.content.barbarianNames.length);
             const bName = this.content.barbarianNames[bIdx];
             // Use actual province IDs from roman_map.js
@@ -722,10 +1106,11 @@ class Engine {
                 actors.push({
                     id: this.generateId(), type: 'barbarian', name: `${bName}`,
                     node: spawnNode, realm: `horde_${bName}`,
-                    strength: 4000 + Math.floor(Math.random() * 10000), 
-                    wealth: 200, grain: 400, supply_level: 1.0, 
+                    // much smaller initial hordes
+                    strength: 800 + Math.floor(Math.random() * 2600),
+                    wealth: 200, grain: 400, supply_level: 1.0,
                     daily_cost: 20, morale: 80,
-                    loyalty: 0, ambition: 100, martial: 8,
+                    loyalty: 0, ambition: 100, martial: 6,
                     personality: 'aggressive', state: 'marching', subordinates: [], superior: null,
                     garrison_id: null
                 });
@@ -835,7 +1220,19 @@ class Engine {
         this.combatState.enemyCenter -= pDamage;
         this.combatState[wing] -= eDamage;
 
+        // Update player's total strength to reflect wing casualties immediately
+        this.updatePlayerStrengthFromWings();
+
         this.print(`Your ${wing} inflicted ${pDamage} casualties and took ${eDamage}.`);
+
+        // Check for total player destruction mid-battle
+        if (this.state.player.strength <= 0) {
+            this.print("Your entire legion has been annihilated in battle. GAME OVER.", "error-text");
+            this.state.flags.game_over = true;
+            this.state.player.strength = 0;
+            this.updateUI();
+            return;
+        }
 
         if (this.combatState.enemyCenter <= 0) {
             this.print(`VICTORY! You routed ${this.combatState.enemy.name}!`, "room");
@@ -871,6 +1268,228 @@ class Engine {
         this.updateUI();
     }
 
+    // Simulate a battle between two actors (attacker vs defender).
+    // attacker may be a lightweight object representing the player.
+    simulateBattle(attacker, defender) {
+        const atkPower = (attacker.strength || 0) * (1 + ((attacker.martial || 3) * 0.05)) * (0.8 + Math.random() * 0.8);
+        const defPower = (defender.strength || 0) * (1 + ((defender.martial || 3) * 0.05)) * (0.8 + Math.random() * 0.8);
+
+        // Casualties proportional to opponent power
+        const atkCas = Math.min(attacker.strength || 0, Math.floor(defPower * 0.25));
+        const defCas = Math.min(defender.strength || 0, Math.floor(atkPower * 0.25));
+
+        // Apply casualties
+        if (attacker.id === 'player') {
+            this.state.player.strength = Math.max(0, this.state.player.strength - atkCas);
+            this.state.player.morale = Math.max(0, (this.state.player.morale || 50) - Math.floor(atkCas / 100));
+        } else {
+            const a = this.state.world.actors.find(a => a.id === attacker.id);
+            if (a) a.strength = Math.max(0, a.strength - atkCas);
+        }
+
+        defender.strength = Math.max(0, defender.strength - defCas);
+        defender.morale = Math.max(0, (defender.morale || 50) - Math.floor(defCas / 100));
+
+        // Determine winner
+        const atkRem = (attacker.id === 'player') ? this.state.player.strength : (this.state.world.actors.find(a => a.id === attacker.id) || {}).strength || 0;
+        const defRem = defender.strength || 0;
+
+        if (atkRem <= 0 && defRem <= 0) {
+            // Both destroyed
+            if (defender.id) defender.state = 'dead';
+            if (attacker.id === 'player') this.print('Both sides were shattered in the fighting!', 'error-text');
+            return 'draw';
+        }
+
+        if (defRem <= 0) {
+            defender.state = 'dead';
+            this.print(`${defender.name} was routed in battle!`, 'intel-text');
+            return 'attacker';
+        }
+
+        if (atkRem <= 0) {
+            if (attacker.id === 'player') this.print('Your army was routed in the assault!', 'error-text');
+            else {
+                const a = this.state.world.actors.find(a => a.id === attacker.id);
+                if (a) a.state = 'dead';
+            }
+            return 'defender';
+        }
+
+        // Otherwise, compare remaining power
+        if (atkRem > defRem) {
+            defender.state = 'dead';
+            this.print(`${defender.name} was defeated after hard fighting.`, 'intel-text');
+            return 'attacker';
+        } else {
+            if (attacker.id === 'player') this.print('Your assault was repelled.', 'error-text');
+            else {
+                const a = this.state.world.actors.find(a => a.id === attacker.id);
+                if (a) a.state = 'dead';
+            }
+            return 'defender';
+        }
+    }
+
+    // Proclaim a new emperor given a candidate actor id
+    proclaimEmperor(candidateId) {
+        const cand = this.state.world.actors.find(a => a.id === candidateId);
+        if (!cand) return;
+        // Demote any existing emperor
+        const oldEmp = this.state.world.actors.find(a => a.id === this.state.world.emperorId);
+        if (oldEmp) {
+            oldEmp.type = 'governor';
+            oldEmp.realm = oldEmp.realm || 'independent';
+        }
+        // Promote candidate
+        cand.type = 'emperor';
+        cand.realm = 'emperor';
+        cand.faction = 'emperor';
+        cand.loyalty = Math.min(100, (cand.loyalty || 50) + 20);
+        this.state.world.emperorId = cand.id;
+        this.print(`${cand.name} has been acclaimed Emperor by the Senate!`, 'intel-text');
+    }
+
+    // Called when emperor dead or vacancy arises. If `force` is true,
+    // run the Senate vote even if an emperor currently sits.
+    processSenateIfNeeded(force = false) {
+        const emperor = this.state.world.actors.find(a => a.id === this.state.world.emperorId);
+        if (!force && emperor && emperor.state !== 'dead') return; // still alive
+        if (!this.state.world.senate || this.state.world.senate.length === 0) {
+            // Try to initialize a senate on-demand from governors or powerful actors
+            const govs = this.state.world.actors.filter(a => a.type === 'governor' && a.state !== 'dead');
+            if (govs.length > 0) {
+                govs.sort((a,b) => ((b.wealth||0) + (b.strength||0)/2) - ((a.wealth||0) + (a.strength||0)/2));
+                const senateSize = Math.min(6, Math.max(1, Math.floor(govs.length / 2)));
+                this.state.world.senate = [];
+                for (let i = 0; i < senateSize && i < govs.length; i++) {
+                    const s = govs[i];
+                    s.isSenator = true;
+                    s.influence = (s.wealth || 1000) / 1000 + (s.strength || 1000) / 2000;
+                    this.state.world.senate.push(s.id);
+                }
+                this.print(`No senate found: auto-constituted ${this.state.world.senate.length} senators from governors.`, 'intel-text');
+            } else {
+                // Fallback: pick top 3 eligible actors (rivals/governors/merchants) as a makeshift senate
+                const elig = this.state.world.actors.filter(a => a.state !== 'dead' && ['governor','rival','merchant','brigand'].includes(a.type));
+                if (elig.length > 0) {
+                    elig.sort((a,b) => ((b.wealth||0) + (b.strength||0)/2) - ((a.wealth||0) + (a.strength||0)/2));
+                    this.state.world.senate = elig.slice(0, Math.min(3, elig.length)).map(a => a.id);
+                    this.state.world.senate.forEach(sid => {
+                        const s = this.state.world.actors.find(a => a.id === sid);
+                        if (s) { s.isSenator = true; s.influence = (s.wealth || 1000)/1000 + (s.strength||1000)/2000; }
+                    });
+                    this.print(`No senate found: created a small temporary senate (${this.state.world.senate.length}).`, 'intel-text');
+                } else {
+                    this.print('Call failed: No eligible actors to form a senate.', 'error-text');
+                    return;
+                }
+            }
+        }
+
+        // Diagnostic: report senators and invocation (helps debug UI button behavior)
+        try {
+            this.print(`Senate called (force=${force}). Senators: ${this.state.world.senate.length}`, 'intel-text');
+            const names = this.state.world.senate.map(sid => {
+                const s = this.state.world.actors.find(a => a.id === sid);
+                return s ? `${s.name}(${sid})` : `${sid}(missing)`;
+            });
+            this.print(`Senators: ${names.join(', ')}`);
+        } catch (e) {
+            console.error('Senate debug print failed', e);
+        }
+
+        // Build candidate list: powerful governors, rivals, player
+        const candidates = [];
+        // player as candidate
+        candidates.push({ id: 'player', name: this.state.player.name, strength: this.state.player.strength, wealth: this.state.player.wealth, loyalty: this.state.player.loyalty || 50 });
+
+        for (const a of this.state.world.actors) {
+            if (a.state === 'dead') continue;
+            if (['governor','rival'].includes(a.type) || a.type === 'emperor') {
+                candidates.push({ id: a.id, name: a.name, strength: a.strength || 0, wealth: a.wealth || 0, loyalty: a.loyalty || 50 });
+            }
+        }
+
+        // Each senator votes for candidate weighted by influence and candidate appeal
+        const votes = new Map();
+        for (const c of candidates) votes.set(c.id, 0);
+
+        for (const senId of this.state.world.senate) {
+            const senator = this.state.world.actors.find(a => a.id === senId);
+            if (!senator) continue;
+            // senator evaluates candidates
+            let best = null; let bestScore = -Infinity;
+            for (const cand of candidates) {
+                const base = (cand.wealth * 0.001) + (cand.strength * 0.01) + ((cand.loyalty || 50) * 0.2);
+                const rel = (senator.loyalty || 50) * 0.1 * (senator.influence || 1);
+                const score = base + rel + (Math.random() * 5 - 2.5);
+                if (score > bestScore) { bestScore = score; best = cand; }
+            }
+            if (best) votes.set(best.id, votes.get(best.id) + 1);
+        }
+
+        // Determine winner
+        let winner = null; let highest = -Infinity;
+        for (const [id, v] of votes.entries()) {
+            if (v > highest) { highest = v; winner = id; }
+        }
+
+        if (winner) {
+            if (winner === 'player') {
+                // Make the player the Emperor without spawning a duplicate actor.
+                this.state.world.emperorId = 'player';
+                this.state.player.realm = 'emperor';
+                this.state.player.faction = 'emperor';
+                // Convert player-controlled provinces to the imperial realm
+                for (const n of Object.values(this.state.world.nodes)) {
+                    if (n.realm === 'player') n.realm = 'emperor';
+                    // leave garrison_id as 'player' so getActorById works for UI/logic
+                    if (n.garrison_id === 'player') {
+                        n.garrison_strength = this.state.player.strength;
+                    }
+                }
+                this.print(`${this.state.player.name} has been acclaimed Emperor!`, 'intel-text');
+            } else {
+                this.proclaimEmperor(winner);
+            }
+        }
+    }
+
+    // Emperor attempts to maintain power: bribe senators, reinforce governors
+    emperorActions() {
+        const emperor = this.state.world.actors.find(a => a.id === this.state.world.emperorId);
+        if (!emperor || emperor.state === 'dead') return;
+        // Bribe random senator if low loyalty
+        if (Math.random() < 0.5 && emperor.wealth > 100) {
+            const senIds = (this.state.world.senate || []).slice();
+            if (senIds.length > 0) {
+                const sid = senIds[Math.floor(Math.random() * senIds.length)];
+                const sen = this.state.world.actors.find(a => a.id === sid);
+                if (sen && (sen.loyalty || 50) < 60) {
+                    const bribe = Math.min(emperor.wealth, 50 + Math.floor(Math.random() * 200));
+                    emperor.wealth -= bribe;
+                    sen.wealth = (sen.wealth || 0) + Math.floor(bribe * 0.6);
+                    sen.loyalty = Math.min(100, (sen.loyalty || 50) + Math.floor(bribe / 20));
+                    this.print(`${emperor.name} bribes ${sen.name} (+${Math.floor(bribe/20)} loyalty)`, 'intel-text');
+                }
+            }
+        }
+
+        // Promote or reward governors to keep them loyal
+        for (const gId of emperor.subordinates || []) {
+            const gov = this.state.world.actors.find(a => a.id === gId);
+            if (!gov || gov.state === 'dead') continue;
+            if ((gov.loyalty || 50) < 40 && emperor.wealth > 200) {
+                const reward = Math.min(emperor.wealth, 100 + Math.floor(Math.random() * 200));
+                emperor.wealth -= reward;
+                gov.wealth = (gov.wealth || 0) + reward;
+                gov.loyalty = Math.min(100, (gov.loyalty || 50) + Math.floor(reward / 50));
+                this.print(`${emperor.name} rewards ${gov.name} to shore loyalty.`, 'intel-text');
+            }
+        }
+    }
+
     updatePlayerStrengthFromWings() {
         this.state.player.strength = Math.max(0, this.combatState.left) + Math.max(0, this.combatState.center) + Math.max(0, this.combatState.right) + Math.max(0, this.combatState.reserve);
     }
@@ -895,7 +1514,7 @@ class Engine {
 
         switch (verb) {
             case 'help':
-                this.print("COMMANDS:\n- look | l\n- wait [days]\n- rest (200 grain → morale)\n- march [province]\n- conquer | tax | extort\n- muster [troops] (10g/troop → more men)\n- market buy (100g → 200 grain) | market sell [amount] (grain → gold)\n- recruit [actor name] (bribe a general, 500g)\n- subordinates | status [name]\n- command [name] [march/conquer/tax/hold]");
+                this.print("COMMANDS:\n- look | l\n- wait [days]\n- rest (200 grain → morale)\n- march [province]\n- conquer | tax | extort\n- muster [troops] (5g/troop → more men)\n- market buy [amount] | market sell [amount] (grain ↔ gold)\n- recruit [actor name] (bribe a general, cost scales by power)\n- subordinates | status [name]\n- command [name] [march/conquer/tax/hold]");
                 break;
             case 'look':
             case 'l':
@@ -927,9 +1546,9 @@ class Engine {
                 this.extort();
                 break;
             case 'market':
-                if (args[1] === 'buy') this.marketBuy();
+                if (args[1] === 'buy') this.marketBuy(parseInt(args[2]) || null);
                 else if (args[1] === 'sell') this.marketSell(parseInt(args[2]) || 0);
-                else this.print("Use: market buy | market sell [grain amount]");
+                else this.print("Use: market buy [amount] | market sell [grain amount]");
                 break;
             case 'wait': {
                 const waitDays = Math.min(30, Math.max(1, parseInt(args[1]) || 1));
@@ -943,7 +1562,7 @@ class Engine {
                 break;
             case 'muster': {
                 const amount = Math.max(1, parseInt(args[1]) || 100);
-                const cost = amount * 10;
+                const cost = amount * 5;
                 if (this.state.player.wealth < cost) {
                     this.print(`You need ${cost} gold to muster ${amount} men. (You have ${this.state.player.wealth}g)`, 'error-text');
                 } else {
@@ -956,6 +1575,40 @@ class Engine {
             }
             case 'recruit':
                 this.recruit(args.slice(1).join(" "));
+                break;
+            case 'call_senate':
+            case 'senate':
+                // Only callable if you control Rome and there is no living emperor
+                const romeId = this.state.world.romeNode || 'i';
+                const controlsRome = this.state.world.nodes[romeId] && this.state.world.nodes[romeId].realm === 'player';
+                if (!controlsRome) {
+                    this.print('You must control Rome to call the Senate.', 'error-text');
+                    break;
+                }
+                // Is there a living emperor (actor) other than player?
+                const empId = this.state.world.emperorId;
+                let livingEmp = false;
+                if (empId) {
+                    if (empId === 'player') livingEmp = true;
+                    else {
+                        const empActor = this.state.world.actors.find(a => a.id === empId);
+                        if (empActor && empActor.state !== 'dead') livingEmp = true;
+                    }
+                }
+                if (livingEmp) {
+                    this.print('You cannot call the Senate while a living Emperor exists.', 'error-text');
+                    break;
+                }
+
+                this.print('Calling the Senate...', 'intel-text');
+                try {
+                    this.processSenateIfNeeded(true);
+                } catch (e) {
+                    console.error('call_senate error', e);
+                    this.print('Senate call failed (see console).', 'error-text');
+                }
+                this.updateUI();
+                this.look();
                 break;
             case 'subordinates':
                 this.listSubordinates();
@@ -985,9 +1638,24 @@ class Engine {
             this.print("The legion marches...");
             this.passTime(2);
             if (!this.state.flags.game_over) this.look();
-        } else {
-            this.print(`You cannot march there. '${targetId}' is not an adjacent province.`, "error-text");
+            return;
         }
+
+        // If not adjacent, attempt to find a path and move one step along it.
+        try {
+            const nextStep = this.findNextStepTo(currentNode.id, targetId);
+            if (nextStep) {
+                this.state.player.node = nextStep;
+                this.print(`You begin a march towards ${targetId} (moving to ${nextStep}).`);
+                this.passTime(3);
+                if (!this.state.flags.game_over) this.look();
+                return;
+            }
+        } catch (e) {
+            // fall through to error message
+        }
+
+        this.print(`You cannot march there. '${targetId}' is not reachable from here.`, "error-text");
     }
 
     conquer() {
@@ -996,13 +1664,16 @@ class Engine {
             this.print("You already own this province.");
             return;
         }
+        // Only consider a defender if they actually control the province (garrison or owner)
+        const defender = this.state.world.actors.find(a => a.node === node.id && a.state !== 'dead' && (a.realm === node.realm || node.garrison_id === a.id));
 
-        const defender = this.state.world.actors.find(a => a.node === node.id && a.state !== 'dead');
-        
         if (defender) {
             this.print(`You declare war on ${defender.name}!`);
+            // Launch interactive combat so player can use wings/tactics
             this.startCombat(defender);
+            // mark that this combat is for conquering the current province
             this.combatState.conquering = true;
+            return; // combat flow will handle passTime/look on resolution
         } else {
             node.realm = 'player';
             node.garrison_id = 'player';
@@ -1046,13 +1717,18 @@ class Engine {
     }
 
     marketBuy() {
-        if (this.state.player.wealth >= 100) {
-            this.state.player.wealth -= 100;
-            this.state.player.grain += 200;
-            this.print("You bought 200 grain for 100 gold.");
+        // Accept optional amount (grain to buy). Default: 200 grain for 100 gold.
+        let amount = 200;
+        if (arguments.length > 0 && Number.isInteger(arguments[0]) && arguments[0] > 0) amount = arguments[0];
+        const pricePerGrain = 0.5; // 0.5 gold per grain => 100 gold = 200 grain
+        const cost = Math.ceil(amount * pricePerGrain);
+        if (this.state.player.wealth >= cost) {
+            this.state.player.wealth -= cost;
+            this.state.player.grain += amount;
+            this.print(`You bought ${amount} grain for ${cost} gold.`);
             this.passTime(1);
         } else {
-            this.print("You don't have enough gold (Need 100).", "error-text");
+            this.print(`You don't have enough gold (Need ${cost}).`, "error-text");
         }
     }
 
@@ -1079,20 +1755,40 @@ class Engine {
             return;
         }
 
-        if (this.state.player.wealth >= 500) {
-            this.state.player.wealth -= 500;
+        // Cost scales with target power
+        const baseCost = 200;
+        const strengthCost = Math.floor((target.strength || 0) / 10);
+        const martialCost = (target.martial || 0) * 50;
+        const recruitCost = baseCost + strengthCost + martialCost;
+
+        if (this.state.player.wealth >= recruitCost) {
+            this.state.player.wealth -= recruitCost;
+
+            // If the target controls a named realm (e.g., rival_x), convert all provinces of that realm to player
+            if (target.realm && target.realm !== 'independent' && target.realm !== 'player') {
+                const oldRealm = target.realm;
+                for (const n of Object.values(this.state.world.nodes)) {
+                    if (n.realm === oldRealm) {
+                        n.realm = 'player';
+                        n.garrison_id = target.id;
+                        n.garrison_strength = target.strength || 0;
+                    }
+                }
+            }
+
             target.type = 'subordinate';
             target.realm = 'player';
+            target.superior = 'player';
             target.loyalty = 70 + Math.floor(Math.random() * 30);
             target.subordinates = target.subordinates || [];
             this.state.player.subordinates.push(target.id);
             // Track diplomacy
             if (!this.state.player.diplomacy) this.state.player.diplomacy = {};
             this.state.player.diplomacy[target.id] = { relation: 'subordinate', trust: target.loyalty, since: this.state.day };
-            this.print(`You spent 500 gold. ${target.name} is now your subordinate general!`, "room");
+            this.print(`You spent ${recruitCost} gold. ${target.name} is now your subordinate general!`, "room");
             this.print(`${target.name}'s Strength: ${target.strength}, Loyalty: ${target.loyalty}`, "intel-text");
         } else {
-            this.print("You need at least 500 gold to bribe a general into your service.", "error-text");
+            this.print(`You need at least ${recruitCost} gold to bribe this general into your service.`, "error-text");
         }
         this.passTime(1);
     }
@@ -1161,6 +1857,13 @@ class Engine {
         } else {
             this.print("Use: command [name] [march [province] | conquer | tax | hold]", "error-text");
         }
+        // Apply a short tick so subordinates execute simple orders immediately
+        try {
+            this.passTime(1);
+            if (!this.state.flags.game_over) this.look();
+        } catch (e) {
+            console.error('error executing subordinate action tick', e);
+        }
     }
 
     rest() {
@@ -1199,13 +1902,20 @@ class Engine {
         const playerProvinces = Object.values(this.state.world.nodes).filter(n => n.realm === 'player');
         const controlsRome = this.state.world.nodes['i'] && this.state.world.nodes['i'].realm === 'player';
         const subCount = this.state.player.subordinates.length;
-        const emperor = this.state.world.actors.find(a => a.id === this.state.world.emperorId);
-        const emperorDead = !emperor || emperor.state === 'dead';
+        const emperorId = this.state.world.emperorId;
+        const emperor = emperorId && emperorId !== 'player' ? this.state.world.actors.find(a => a.id === emperorId) : null;
+        const emperorDead = !emperorId || (emperorId !== 'player' && (!emperor || emperor.state === 'dead'));
+
+        // Victory objective: be Emperor and hold >50% of provinces (imperial unity)
+        const totalProvinces = Object.keys(this.state.world.nodes).length;
+        const imperialProvinces = Object.values(this.state.world.nodes).filter(n => n.realm === 'emperor').length;
+        const playerIsEmperor = (this.state.world.emperorId === 'player');
 
         const definitions = [
             { id: 'seize_rome',    label: 'Seize Rome (Latium et Campania)',    done: controlsRome },
             { id: 'ten_provinces', label: 'Control 10 Provinces',               done: playerProvinces.length >= 10 },
             { id: 'defeat_emp',    label: 'Defeat the Emperor in Battle',        done: emperorDead },
+            { id: 'imperial_unity', label: 'Be Emperor and control >50% provinces', done: playerIsEmperor && imperialProvinces > (totalProvinces/2) },
             { id: 'three_generals',label: 'Command 3 Subordinate Generals',      done: subCount >= 3 },
             { id: 'wealthy',       label: 'Accumulate 10,000 Gold',             done: this.state.player.wealth >= 10000 },
         ];
@@ -1217,6 +1927,10 @@ class Engine {
             } else if (!existing.done && def.done) {
                 existing.done = true;
                 this.print(`★ OBJECTIVE COMPLETE: ${def.label}`, 'room');
+                if (def.id === 'imperial_unity') {
+                    this.print('VICTORY — You have unified the Roman provinces under your rule!', 'intel-text');
+                    this.state.flags.game_over = true;
+                }
             } else {
                 existing.done = def.done;
                 existing.label = def.label;

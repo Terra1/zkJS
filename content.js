@@ -77,3 +77,16 @@ for (const [id, def] of Object.entries(RomanGeoMap)) {
         grain_requirement: Math.floor(50 + Math.random() * 150)
     };
 }
+
+// Ensure Cyprus borders only Cilicia (fix adjacency)
+if (GameContent.graphData['cyprus']) {
+    GameContent.graphData['cyprus'].neighbors = ['cilicia'];
+}
+// Ensure bidirectional adjacency: add Cyprus to Cilicia's neighbors if missing
+if (GameContent.graphData['cilicia']) {
+    const neigh = GameContent.graphData['cilicia'].neighbors || [];
+    if (!neigh.includes('cyprus')) {
+        neigh.push('cyprus');
+        GameContent.graphData['cilicia'].neighbors = neigh;
+    }
+}

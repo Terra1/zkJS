@@ -94,19 +94,33 @@ document.addEventListener('DOMContentLoaded', () => {
                 mapInitialized = true;
             }
 
-            // Update Map Colors
+            // Update Map Colors: color by controlling actor when possible
+            const emperorId = state.world && state.world.emperorId;
+            const actorColor = (key) => {
+                if (!key) return '#666666';
+                if (key === 'player') return '#33ff33';
+                if (key === emperorId || key === 'emperor') return '#ff3333';
+                if (String(key).startsWith('horde')) return '#ff8800';
+                // deterministic HSL based on key string
+                let hash = 0;
+                for (let i = 0; i < String(key).length; i++) hash = (hash * 31 + String(key).charCodeAt(i)) >>> 0;
+                const h = hash % 360;
+                return `hsl(${h},70%,50%)`;
+            };
+
             for (const [id, tile] of Object.entries(state.world.nodes)) {
                 const poly = document.getElementById(`map-poly-${id}`);
                 if (!poly) continue;
-                
-                let fill = '#333';
-                if (tile.realm === 'player') fill = '#33ff33';
-                else if (tile.realm === 'emperor') fill = '#ff3333';
-                else if (tile.realm.startsWith('rival')) fill = '#ffff33';
-                else if (tile.realm.startsWith('horde')) fill = '#ff8800';
-                else fill = '#8888ff';
-                
-                poly.setAttribute("fill", fill);
+
+                // Prefer political realm ownership for coloring (player/emperor),
+                // fall back to garrison owner if no clear realm owner.
+                let ownerKey = null;
+                if (tile.realm === 'player') ownerKey = 'player';
+                else if (tile.realm === 'emperor') ownerKey = emperorId || 'emperor';
+                else if (tile.garrison_id) ownerKey = tile.garrison_id;
+                else ownerKey = tile.realm;
+
+                poly.setAttribute("fill", actorColor(ownerKey));
                 
                 if (id === state.player.node) {
                     poly.setAttribute("stroke", "#fff");
@@ -124,23 +138,66 @@ document.addEventListener('DOMContentLoaded', () => {
             uiLocation.innerHTML = `<strong>Region:</strong> ${currentNode.name}<br><strong>Realm Owner:</strong> ${currentNode.realm}`;
             uiDate.innerHTML = `<strong>Day:</strong> ${state.day}`;
             
-            const emp = state.world.actors.find(a => a.id === state.world.emperorId);
-            uiIntel.innerHTML = `<strong>Emperor:</strong> ${emp && emp.state !== 'dead' ? emp.strength : 'DEAD'} troops<br><br><strong>Active Threats:</strong><br>`;
+            const emperorForIntel = state.world.actors.find(a => a.id === state.world.emperorId);
+            uiIntel.innerHTML = `<strong>Emperor:</strong> ${emperorForIntel && emperorForIntel.state !== 'dead' ? emperorForIntel.strength : 'DEAD'} troops<br><br><strong>Active Threats:</strong><br>`;
             state.world.actors.filter(a => (a.type === 'rival' || a.type === 'barbarian') && a.state !== 'dead').forEach(r => {
                 const threatNode = state.world.nodes[r.node];
                 uiIntel.innerHTML += `- ${r.name} (${r.type})<br>  [Str: ${r.strength}] at ${threatNode ? threatNode.name : 'Unknown'}<br>`;
             });
 
-            // Bureaucracy Tab
+            // Bureaucracy Tab: render hierarchy and Senate
             uiBureaucracy.innerHTML = `<strong>Imperial Bureaucracy</strong><br><br>`;
-            const livingActors = state.world.actors.filter(a => a.state !== 'dead' && a.type !== 'emperor');
-            livingActors.forEach(a => {
-                const actNode = state.world.nodes[a.node];
-                uiBureaucracy.innerHTML += `<span style="color:#ffaa00">${a.name}</span> (${a.type})<br>`;
-                uiBureaucracy.innerHTML += `  Personality: ${a.personality}<br>`;
-                uiBureaucracy.innerHTML += `  Stats: Loyalty ${a.loyalty} | Ambition ${a.ambition} | Martial ${a.martial}<br>`;
-                uiBureaucracy.innerHTML += `  Army: ${a.strength} | Location: ${actNode ? actNode.name : 'Unknown'}<br><br>`;
-            });
+            const actorsById = {};
+            // Include actors and a pseudo-actor for the player so UI trees can reference 'player'
+            state.world.actors.forEach(a => actorsById[a.id] = a);
+            actorsById['player'] = { id: 'player', name: state.player.name, node: state.player.node, strength: state.player.strength, loyalty: state.player.loyalty };
+
+            function renderActorTree(rootId, depth = 0) {
+                const a = actorsById[rootId];
+                if (!a || a.state === 'dead') return '';
+                let out = '';
+                out += `${'&nbsp;'.repeat(depth*4)}<strong>${a.name}</strong> (${a.type}) - Str:${a.strength} Loy:${a.loyalty}<br>`;
+                // find subordinates
+                state.world.actors.filter(x => x.superior === rootId).forEach(sub => {
+                    out += renderActorTree(sub.id, depth + 1);
+                });
+                return out;
+            }
+
+            // Emperor root
+            const emperorActor = state.world.actors.find(a => a.id === state.world.emperorId);
+            if (emperorActor) uiBureaucracy.innerHTML += renderActorTree(emperorActor.id, 0);
+
+            // Player's sub-tree (if not emperor)
+            if (!emperorActor || emperorActor.id !== state.player.id) {
+                uiBureaucracy.innerHTML += `<br><strong>Your House</strong><br>`;
+                uiBureaucracy.innerHTML += renderActorTree('player', 0) || `You: Str:${state.player.strength} Loy:${state.player.loyalty}<br>`;
+            }
+
+            // Senate display + control
+            uiBureaucracy.innerHTML += `<br><strong>Senate</strong><br>`;
+            if (state.world.senate && state.world.senate.length > 0) {
+                state.world.senate.forEach(sid => {
+                    const s = actorsById[sid];
+                    if (!s) return;
+                    uiBureaucracy.innerHTML += `- ${s.name} (${s.node ? state.world.nodes[s.node].name : 'Unknown'}) Loy:${s.loyalty} Infl:${(s.influence||0).toFixed(2)}<br>`;
+                });
+            } else {
+                uiBureaucracy.innerHTML += `<em>No senate constituted.</em><br>`;
+            }
+            uiBureaucracy.innerHTML += `<div style="margin-top:6px"><button id="call-senate-btn">Call Senate (vote)</button></div>`;
+
+            // Attach a one-time event handler to the Call Senate button
+            setTimeout(() => {
+                const btn = document.getElementById('call-senate-btn');
+                if (btn && !btn.dataset.attached) {
+                    btn.addEventListener('click', () => {
+                        // Use the engine command path so UI shows command echo and results
+                        engine.parse('call_senate');
+                    });
+                    btn.dataset.attached = '1';
+                }
+            }, 0);
 
             // Economy Tab
             let globalWealth = 0;
